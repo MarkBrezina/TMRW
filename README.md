@@ -1,3 +1,1 @@
 
-# TMRW – A Multi-Horizon AI Trading Framework
-TMRW (Tomorrow Capital Research) is an ambitious, research-grade framework for building, back-testing and deploying algorithmic trading strategies that span millisecond-level market-making all the way out to multi-year, macro-thematic investing.  It combines modern machine-learning, mean-field-game theory and rigorous risk management into a single “pod” architecture designed to keep compounding capital in every market regime.  Although still early-stage (0 stars, many sections flagged “on hold” or “unfinished”), the repo already sketches a clear technical blueprint, a business plan and a multi-year product roadmap. 
