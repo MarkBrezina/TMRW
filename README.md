@@ -144,3 +144,224 @@ Hardware costs
 Data costs
 Standard Capital
 Profits
+
+
+```
+import yfinance as yf
+import pandas as pd
+from pathlib import Path
+
+DATA_DIR = Path("data/yahoo_minute")
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+def download_symbol(symbol: str):
+    df = yf.download(
+        tickers=symbol,
+        period="7d",
+        interval="1m",
+        auto_adjust=False,
+        prepost=False,
+        progress=False
+    )
+
+    if df.empty:
+        print(f"No data for {symbol}")
+        return None
+
+    df = df.reset_index()
+
+    # yfinance usually gives Datetime column for intraday
+    if "Datetime" in df.columns:
+        df = df.rename(columns={"Datetime": "timestamp"})
+    elif "Date" in df.columns:
+        df = df.rename(columns={"Date": "timestamp"})
+
+    df["symbol"] = symbol
+    df["source"] = "yahoo"
+
+    # Standardise column names
+    df = df.rename(columns={
+        "Open": "open",
+        "High": "high",
+        "Low": "low",
+        "Close": "close",
+        "Adj Close": "adj_close",
+        "Volume": "volume"
+    })
+
+    cols = [
+        "timestamp", "symbol", "open", "high", "low",
+        "close", "adj_close", "volume", "source"
+    ]
+
+    return df[[c for c in cols if c in df.columns]]
+
+
+symbols = ["AAPL", "MSFT", "NVDA", "TSLA", "SPY","EURUSD=X", "GBPUSD=X", "GC=F", "BTC-USD", "ETH-USD", "^GSPC"]
+
+all_data = []
+
+for symbol in symbols:
+    df_symbol = download_symbol(symbol)
+    if df_symbol is not None:
+        all_data.append(df_symbol)
+
+df_all = pd.concat(all_data, ignore_index=True)
+
+output_path = DATA_DIR / "minute_equities_latest.parquet"
+
+df_all.to_parquet(
+    output_path,
+    engine="pyarrow",
+    compression="zstd",
+    index=False
+)
+
+print(f"Saved {len(df_all):,} rows to {output_path}")
+```
+
+
+```
+import yfinance as yf
+import pandas as pd
+from pathlib import Path
+
+DATA_DIR = Path("data/yahoo_minute")
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+symbols = ["AAPL", "MSFT", "NVDA", "TSLA", "SPY","EURUSD=X", "GBPUSD=X", "GC=F", "BTC-USD", "ETH-USD", "^GSPC"]
+
+def fetch_1m(symbol: str) -> pd.DataFrame:
+    try:
+        df = yf.download(
+            tickers=symbol,
+            period="7d",
+            interval="1m",
+            auto_adjust=False,
+            prepost=False,
+            progress=False,
+            group_by="column",
+            multi_level_index=False,
+        )
+    except TypeError:
+        # Fallback for older yfinance versions
+        df = yf.download(
+            tickers=symbol,
+            period="7d",
+            interval="1m",
+            auto_adjust=False,
+            prepost=False,
+            progress=False,
+            group_by="column",
+        )
+
+    if df is None or df.empty:
+        return pd.DataFrame()
+
+    # Handle MultiIndex columns if yfinance still returns them
+    if isinstance(df.columns, pd.MultiIndex):
+        # Common case: columns are like ("Close", "AAPL")
+        if symbol in df.columns.get_level_values(-1):
+            df = df.xs(symbol, axis=1, level=-1)
+
+        # Other case: columns are like ("AAPL", "Close")
+        elif symbol in df.columns.get_level_values(0):
+            df = df[symbol]
+
+        # Fallback: if one column level has only one value, drop it
+        else:
+            for level in range(df.columns.nlevels):
+                if len(df.columns.get_level_values(level).unique()) == 1:
+                    df.columns = df.columns.droplevel(level)
+                    break
+
+    df = df.reset_index()
+
+    # Standardise column names
+    df.columns = [
+        str(c).strip().lower().replace(" ", "_")
+        for c in df.columns
+    ]
+
+    # yfinance usually gives "datetime" for intraday
+    rename_map = {
+        "datetime": "timestamp",
+        "date": "timestamp",
+        "open": "open",
+        "high": "high",
+        "low": "low",
+        "close": "close",
+        "adj_close": "adj_close",
+        "volume": "volume",
+    }
+
+    df = df.rename(columns=rename_map)
+
+    if "timestamp" not in df.columns:
+        print(f"{symbol}: columns returned were {list(df.columns)}")
+        raise KeyError(f"{symbol}: no timestamp column found")
+
+    df["symbol"] = symbol
+    df["source"] = "yahoo"
+
+    keep_cols = [
+        "timestamp", "symbol", "open", "high", "low",
+        "close", "adj_close", "volume", "source"
+    ]
+
+    existing_cols = [c for c in keep_cols if c in df.columns]
+    df = df[existing_cols]
+
+    return df
+
+
+def update_symbol(symbol: str):
+    path = DATA_DIR / f"{symbol}.parquet"
+
+    new_df = fetch_1m(symbol)
+
+    if new_df.empty:
+        print(f"{symbol}: no new data")
+        return
+
+    required = {"timestamp", "symbol"}
+
+    if not required.issubset(new_df.columns):
+        print(f"{symbol}: bad new dataframe columns: {list(new_df.columns)}")
+        return
+
+    if path.exists():
+        old_df = pd.read_parquet(path)
+
+        # If an old file was saved in the wrong format, back it up and start clean
+        if not required.issubset(old_df.columns):
+            backup_path = DATA_DIR / f"{symbol}_bad_backup.parquet"
+            path.rename(backup_path)
+            print(f"{symbol}: old file had bad columns. Backed up to {backup_path}")
+            combined = new_df
+        else:
+            combined = pd.concat([old_df, new_df], ignore_index=True)
+    else:
+        combined = new_df
+
+    combined = combined.drop_duplicates(
+        subset=["timestamp", "symbol"],
+        keep="last"
+    )
+
+    combined = combined.sort_values(["symbol", "timestamp"])
+
+    combined.to_parquet(
+        path,
+        engine="pyarrow",
+        compression="zstd",
+        index=False
+    )
+
+    print(f"{symbol}: saved {len(combined):,} rows to {path}")
+
+
+for symbol in symbols:
+    update_symbol(symbol)
+
+```
